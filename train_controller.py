@@ -95,23 +95,23 @@ class TrainHub:
         # Subscribe to notifications FIRST
         await self.client.start_notify(UART_UUID, self._notification_handler)
 
-        # CRITICAL: Start heartbeat IMMEDIATELY - don't wait!
-        # The hub will timeout if we don't send commands within ~1 second
+        # Start heartbeat IMMEDIATELY - it will send LED commands during init
         self._running = True
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         
         print("Heartbeat started, waiting for port discovery...")
         
-        # NOW wait for port discovery while heartbeat keeps connection alive
-        # The hub will send 4 port attachment notifications during this time
-        await asyncio.sleep(2.0)  # Reduced from 4 seconds
+        # Wait for port discovery while heartbeat blinks LED
+        await asyncio.sleep(2.0)
 
-        # Set LED color
+        # Mark as initialized - heartbeat will now send speed commands
+        self._initialized = True
+        
+        # Set final LED color
         print("Setting initial LED color...")
         await self._send_led_command(LED_COLORS["green"])
         await asyncio.sleep(0.2)
 
-        self._initialized = True
         print("Hub ready for commands.")
         return True
 
@@ -157,33 +157,37 @@ class TrainHub:
     # ----------------------------
     async def _heartbeat_loop(self):
         """
-        Periodically re-send the current speed command.
+        Periodically re-send the current speed command OR blink LED during init.
         This keeps traffic flowing (like the official remote),
         which helps prevent the hub from dropping the connection.
         """
-        interval = 0.1  # 100 ms - match the official remote's frequency
+        interval = 0.1  # 100 ms
 
         print("Heartbeat loop running.")
         
-        # Send first command immediately to prevent timeout
-        if self.client and self.client.is_connected:
-            try:
-                await self._send_speed_command(0)
-            except Exception as e:
-                print("Initial heartbeat failed:", repr(e))
-                self._running = False
-                return
+        # During initialization, just blink the LED to keep connection alive
+        # Don't send motor commands until hub is ready
+        init_color_toggle = True
         
         while self._running and self.client and self.client.is_connected:
-            await asyncio.sleep(interval)
-            
             try:
-                # Always send the current speed (even if it's 0)
-                await self._send_speed_command(self._desired_speed)
+                if self._initialized:
+                    # Hub is ready - send actual speed commands
+                    await self._send_speed_command(self._desired_speed)
+                else:
+                    # Still initializing - alternate LED colors to keep alive
+                    if init_color_toggle:
+                        await self._send_led_command(LED_COLORS["white"])
+                    else:
+                        await self._send_led_command(LED_COLORS["blue"])
+                    init_color_toggle = not init_color_toggle
+                    
             except Exception as e:
                 print("Heartbeat write failed:", repr(e))
                 self._running = False
                 break
+            
+            await asyncio.sleep(interval)
 
         print("Heartbeat loop exiting.")
 
