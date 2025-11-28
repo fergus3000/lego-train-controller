@@ -53,7 +53,7 @@ class TrainHub:
     async def discover_address():
         """Find the first HUB NO.4 in range and return its address."""
         print("Scanning for HUB NO.4...")
-        devices = await BleakScanner.discover(timeout=5.0)
+        devices = await BleakScanner.discover(timeout=20.0)
         for d in devices:
             name = d.name or ""
             if TARGET_NAME in name:
@@ -88,18 +88,26 @@ class TrainHub:
             self.client = None
             return False
 
-        print("Connected. Hub LED should now be solid white.")
+        print("Connected. Waiting for hub to initialize...")
 
         # Subscribe to notifications (like the real remote does)
         await self.client.start_notify(UART_UUID, self._notification_handler)
 
-        # Start heartbeat loop
+        # IMPORTANT: Give the hub time to discover its ports and initialize
+        # The hub sends several 0x04 (port attachment) messages during this time
+        await asyncio.sleep(2.0)
+
+        # Start heartbeat loop AFTER initialization
         self._running = True
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
         # Optional: set an initial LED color so you can see it's under Pi control
         await self.set_led("green")
+        
+        # Give LED command time to process before other commands
+        await asyncio.sleep(0.3)
 
+        print("Hub ready for commands.")
         return True
 
     async def disconnect(self):
@@ -153,10 +161,14 @@ class TrainHub:
         print("Heartbeat loop started.")
         while self._running and self.client and self.client.is_connected:
             try:
-                await self._send_speed_command(self._desired_speed)
+                # Only send if we have a non-zero speed or if we've explicitly set it
+                # Don't spam zero commands at startup
+                if self._desired_speed != 0 or hasattr(self, '_speed_was_set'):
+                    await self._send_speed_command(self._desired_speed)
             except Exception as e:
                 print("Heartbeat write failed:", repr(e))
                 # If we fail here, likely the hub disconnected.
+                self._running = False
                 break
 
             await asyncio.sleep(interval)
@@ -209,6 +221,7 @@ class TrainHub:
         """
         print(f"Setting speed to {speed}")
         self._desired_speed = speed
+        self._speed_was_set = True  # Mark that we've explicitly set a speed
 
         # Also send immediately, so it reacts without waiting for the next heartbeat tick.
         if self.client and self.client.is_connected:
@@ -247,6 +260,7 @@ class TrainHub:
         """
         print("Starting demo show...")
         await self.set_led("green")
+        await asyncio.sleep(0.5)  # Let LED command settle
 
         # ramp up
         for s in range(0, 60, 10):  # 0,10,20,30,40,50
@@ -262,6 +276,7 @@ class TrainHub:
             await asyncio.sleep(0.5)
 
         await self.stop()
+        await asyncio.sleep(0.3)
         await self.set_led("white")
         print("Demo show complete.")
         
