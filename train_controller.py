@@ -100,23 +100,21 @@ class TrainHub:
         print("Waiting 4 seconds for port discovery...")
         await asyncio.sleep(4.0)
 
-        # Mark as initialized BEFORE starting heartbeat
+        # Set LED first BEFORE starting heartbeat
+        print("Setting initial LED color...")
+        await self._send_led_command(LED_COLORS["green"])
+        await asyncio.sleep(0.3)
+
+        # Mark as initialized and start heartbeat
         self._initialized = True
         self._running = True
         
-        # Start heartbeat loop
+        # Start heartbeat loop - it will send speed=0 commands
         print("Starting heartbeat loop...")
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         
-        # Give the heartbeat task a moment to actually start and send its first keep-alive
-        await asyncio.sleep(0.5)
-        
-        # Optional: set an initial LED color so you can see it's under Pi control
-        print("Setting initial LED color...")
-        await self.set_led("green")
-        
-        # Give LED command time to process
-        await asyncio.sleep(0.5)
+        # Give the heartbeat a moment to start
+        await asyncio.sleep(0.3)
 
         print("Hub ready for commands.")
         return True
@@ -163,32 +161,21 @@ class TrainHub:
     # ----------------------------
     async def _heartbeat_loop(self):
         """
-        Periodically re-send the current speed command OR send a keep-alive.
+        Periodically re-send the current speed command.
         This keeps traffic flowing (like the official remote),
         which helps prevent the hub from dropping the connection.
         """
-        interval = 0.3  # 300 ms - slower to avoid overwhelming the hub
+        interval = 0.1  # 100 ms - match the official remote's frequency
 
         print("Heartbeat loop running.")
-        
-        # Send initial keep-alive immediately
-        try:
-            await self._send_keep_alive()
-        except Exception as e:
-            print("Initial keep-alive failed:", repr(e))
-            self._running = False
-            return
         
         while self._running and self.client and self.client.is_connected:
             await asyncio.sleep(interval)
             
             try:
-                # Send speed commands if we have a non-zero speed
-                if self._desired_speed != 0:
-                    await self._send_speed_command(self._desired_speed)
-                else:
-                    # Send keep-alive when idle
-                    await self._send_keep_alive()
+                # Always send the current speed (even if it's 0)
+                # This mimics what the official remote does
+                await self._send_speed_command(self._desired_speed)
             except Exception as e:
                 print("Heartbeat write failed:", repr(e))
                 self._running = False
