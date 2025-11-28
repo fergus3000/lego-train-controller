@@ -45,6 +45,8 @@ class TrainHub:
         # state
         self._desired_speed = 0       # -100..100
         self._running = False         # controls heartbeat loop
+        self._initialized = False     # hub ready for commands
+        self._speed_was_set = False   # track if we've set speed explicitly
 
     # ----------------------------
     # Discovery / connection
@@ -95,17 +97,23 @@ class TrainHub:
 
         # IMPORTANT: Give the hub time to discover its ports and initialize
         # The hub sends several 0x04 (port attachment) messages during this time
-        await asyncio.sleep(2.0)
+        # Wait longer to ensure all ports are registered
+        print("Waiting 4 seconds for port discovery...")
+        await asyncio.sleep(4.0)
 
-        # Start heartbeat loop AFTER initialization
-        self._running = True
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-
+        # Mark as initialized
+        self._initialized = True
+        
         # Optional: set an initial LED color so you can see it's under Pi control
+        print("Setting initial LED color...")
         await self.set_led("green")
         
-        # Give LED command time to process before other commands
-        await asyncio.sleep(0.3)
+        # Give LED command time to process
+        await asyncio.sleep(1.0)
+        
+        # NOW start heartbeat loop - after all initialization is complete
+        self._running = True
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
         print("Hub ready for commands.")
         return True
@@ -152,19 +160,22 @@ class TrainHub:
     # ----------------------------
     async def _heartbeat_loop(self):
         """
-        Periodically re-send the current speed command.
+        Periodically re-send the current speed command OR send a keep-alive.
         This keeps traffic flowing (like the official remote),
         which helps prevent the hub from dropping the connection.
         """
-        interval = 0.2  # 200 ms, similar to the real remote's chatter
+        interval = 0.15  # 150 ms, similar to the real remote's chatter
 
         print("Heartbeat loop started.")
         while self._running and self.client and self.client.is_connected:
             try:
-                # Only send if we have a non-zero speed or if we've explicitly set it
-                # Don't spam zero commands at startup
-                if self._desired_speed != 0 or hasattr(self, '_speed_was_set'):
+                # Only send speed commands if initialized and we have a non-zero speed
+                if self._initialized and self._desired_speed != 0:
                     await self._send_speed_command(self._desired_speed)
+                elif self._initialized:
+                    # Send a simple "hub properties" request as keep-alive
+                    # This is a lightweight command that keeps the connection active
+                    await self._send_keep_alive()
             except Exception as e:
                 print("Heartbeat write failed:", repr(e))
                 # If we fail here, likely the hub disconnected.
@@ -178,6 +189,19 @@ class TrainHub:
     # ----------------------------
     # Low-level commands
     # ----------------------------
+    async def _send_keep_alive(self):
+        """
+        Send a lightweight keep-alive message to maintain the connection.
+        This is a Hub Properties request for the hub name.
+        """
+        if not self.client or not self.client.is_connected:
+            raise RuntimeError("Not connected")
+        
+        # Hub Properties: Get Advertising Name (property 0x01)
+        # [len, hub_id, msg_type(0x01), property(0x01)]
+        cmd = bytearray([0x05, 0x00, 0x01, 0x01, 0x05])
+        await self.client.write_gatt_char(UART_UUID, cmd)
+
     async def _send_speed_command(self, speed: int, port: int = 0x00):
         """
         Send a direct mode motor power command to Port A (default).
