@@ -55,7 +55,7 @@ class TrainHub:
     async def discover_address():
         """Find the first HUB NO.4 in range and return its address."""
         print("Scanning for HUB NO.4...")
-        devices = await BleakScanner.discover(timeout=20.0)
+        devices = await BleakScanner.discover(timeout=6.0)
         for d in devices:
             name = d.name or ""
             if TARGET_NAME in name:
@@ -97,23 +97,26 @@ class TrainHub:
 
         # IMPORTANT: Give the hub time to discover its ports and initialize
         # The hub sends several 0x04 (port attachment) messages during this time
-        # Wait longer to ensure all ports are registered
         print("Waiting 4 seconds for port discovery...")
         await asyncio.sleep(4.0)
 
-        # Mark as initialized
+        # Mark as initialized BEFORE starting heartbeat
         self._initialized = True
+        self._running = True
+        
+        # Start heartbeat loop
+        print("Starting heartbeat loop...")
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        
+        # Give the heartbeat task a moment to actually start and send its first keep-alive
+        await asyncio.sleep(0.5)
         
         # Optional: set an initial LED color so you can see it's under Pi control
         print("Setting initial LED color...")
         await self.set_led("green")
         
         # Give LED command time to process
-        await asyncio.sleep(1.0)
-        
-        # NOW start heartbeat loop - after all initialization is complete
-        self._running = True
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        await asyncio.sleep(0.5)
 
         print("Hub ready for commands.")
         return True
@@ -164,27 +167,34 @@ class TrainHub:
         This keeps traffic flowing (like the official remote),
         which helps prevent the hub from dropping the connection.
         """
-        interval = 0.15  # 150 ms, similar to the real remote's chatter
+        interval = 0.3  # 300 ms - slower to avoid overwhelming the hub
 
-        print("Heartbeat loop started.")
+        print("Heartbeat loop running.")
+        
+        # Send initial keep-alive immediately
+        try:
+            await self._send_keep_alive()
+        except Exception as e:
+            print("Initial keep-alive failed:", repr(e))
+            self._running = False
+            return
+        
         while self._running and self.client and self.client.is_connected:
+            await asyncio.sleep(interval)
+            
             try:
-                # Only send speed commands if initialized and we have a non-zero speed
-                if self._initialized and self._desired_speed != 0:
+                # Send speed commands if we have a non-zero speed
+                if self._desired_speed != 0:
                     await self._send_speed_command(self._desired_speed)
-                elif self._initialized:
-                    # Send a simple "hub properties" request as keep-alive
-                    # This is a lightweight command that keeps the connection active
+                else:
+                    # Send keep-alive when idle
                     await self._send_keep_alive()
             except Exception as e:
                 print("Heartbeat write failed:", repr(e))
-                # If we fail here, likely the hub disconnected.
                 self._running = False
                 break
 
-            await asyncio.sleep(interval)
-
-        print("Heartbeat loop exiting (client disconnected or stopped).")
+        print("Heartbeat loop exiting.")
 
     # ----------------------------
     # Low-level commands
